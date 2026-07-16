@@ -1,0 +1,22 @@
+# Model configuration — the ONLY place models are chosen (never CLI args, never env vars).
+# Safe to commit: api_key_env holds the NAME of the env var with the real token.
+# The models below are placeholders; upgrade by editing this file.
+
+[orchestrator]
+base_url    = "https://api.anthropic.com"
+model       = "claude-fable-5"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[[subagent_model]]
+name        = "opus"
+base_url    = "https://api.anthropic.com"
+model       = "claude-opus-4-8"
+api_key_env = "ANTHROPIC_API_KEY"
+description = "Careful coder and reviewer. Prefer for writing experiment code and reviewing code before it runs."
+
+[[subagent_model]]
+name        = "gpt"
+base_url    = "https://api.openai.com/v1"
+model       = "gpt-5.6-sol"
+api_key_env = "OPENAI_API_KEY"
+description = "Different model family from the orchestrator. Prefer for cross-checking, second opinions, and re-reviewing unexpected results."

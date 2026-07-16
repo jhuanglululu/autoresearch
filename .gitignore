@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# runtime data (git-tracked separately if desired)
+data/          # downloaded dataset cache
+state/         # per-goal orchestrator checkpoints
+queue/jobs/    # in-flight GPU job files
+wiki-library/.index/

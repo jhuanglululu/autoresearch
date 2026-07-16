@@ -1,0 +1,20 @@
+# A research goal. Start with:  python -m autoresearch goals/example.toml
+# A known id resumes from its checkpoint in state/<id>/; a new id starts fresh
+# from the template.
+#
+# A goal is a self-contained research domain: it pins its own baseline lab
+# template and read-only assets, so another goal can target a different domain
+# entirely (a TTS model, another language corpus, ...) without touching code.
+
+id       = "example"
+template = "templates/example.md"
+
+[experiment]
+# Lab template (a uv project) copied to lab/<lab-id>/ when a lab is created.
+baseline = "experiments/baseline-lm-zhtw"
+
+# The goal's pinned untouchables, mounted read-only at /assets/<name> in every
+# run container. No subagent may edit, copy over, or substitute these.
+[experiment.assets]
+tokenizer = "tokenizer.json"
+corpus    = "data/wikipedia-zhtw"
