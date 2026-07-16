@@ -50,12 +50,16 @@ lookups) are **prompt templates the orchestrator composes at spawn time**, not t
 | **executor** | Writes experiment code, executes it, submits GPU jobs via tool call, writes wiki. |
 | **researcher** | No code editing or execution (it couldn't run what it writes). Searches web/arXiv, reads everything, **writes wiki notes directly**. |
 
-**Write tools are strictly separated:**
+**Tools are per-action, and write tools are strictly separated:**
 
-- `wiki_write` — can only touch the wiki, and goes through the store so wiki structure
-  and invariants (citations, types, immutability of sources) are always maintained.
+- Wiki tools are one-per-action (`wiki_search`, `wiki_read`, `wiki_graph_*`, … read-only;
+  `wiki_capture_source`, `wiki_write_summary`, `wiki_retract_source` writes). The write
+  tools can only touch the wiki, through the store, so wiki structure and invariants
+  (citations, types, immutability of sources) are always maintained.
 - `write` — can only write inside the current editable **lab**. It cannot touch the
   archive (past run dirs) and cannot touch the wiki. Executor-only.
+- `analyze_records` — runs inline Python with **read-only** filesystem access, for
+  programmatic analysis of run bookkeeping (`records.jsonl`, metrics across runs).
 
 Brainstormer is skipped when you propose an idea yourself or a previous brainstorm
 already yielded multiple ideas.
@@ -102,25 +106,35 @@ goal uses `experiments/baseline-lm-zhtw/`).
   harness. If an idea needs extra metrics to be understood, the engineer edits the
   training loop to collect them.
 - **The only untouchables are the goal's pinned assets** (for the example goal: the
-  wikipedia-zhtw corpus + `tokenizer.json`) — mounted read-only at `/assets/<name>`,
-  outside every lab, never edited by any subagent.
+  wikipedia-zhtw corpus + `tokenizer.json`) — kept outside every lab, read-only by
+  file permissions, never edited by any subagent. The worker resolves their paths
+  into each run's `run_config.toml` `[assets]` section.
 - Baseline templates ship with standard evals (for the LM template: val loss /
   perplexity, tokens/sec, peak VRAM, param counts) so runs stay comparable by default;
   deviations are visible in the run record and it's the orchestrator's job to question
   comparisons that no longer hold.
+- Every run leaves two records: `metrics.json` (at-a-glance summary, read directly) and
+  `records.jsonl` (append-only machine log of everything — config, train/eval events,
+  failures — for bookkeeping and Python analysis via `analyze_records`). Weights are
+  saved as safetensors.
 - Single-GPU sequential job queue. Launching an experiment is a **tool call, not a CLI
   invocation** — no CLI args, no env vars; everything from the lab + stored run config.
   Code is snapshotted per run (`lab/<id>/runs/<n>/code/`, sha256-hashed) so any result
-  can be reproduced. Runs execute in an offline container (env built from the lab's uv
-  project) with the assets mounted read-only, GPU passthrough, and a host-side
-  wall-clock kill.
+  can be reproduced. Runs execute as **sandboxed subprocesses**: a per-run uv env built
+  from the lab's pyproject, launched in its own process group (`setsid`) with
+  cwd = run dir and a host-side wall-clock kill of the whole group; assets stay
+  read-only via file permissions. Docker is deliberately not used: the rented GPU
+  box (gputw) is itself an unprivileged container where no container runtime can
+  work, and the single-operator threat model (the sandbox prevents mistakes, not
+  adversaries) makes subprocess isolation sufficient. Consequence to stay honest
+  about: no network cutoff inside runs.
 
 ## Goals & configuration
 
 The orchestrator script is generic. A **goal** is a TOML with an `id`, an initial
 `template` (seed prompt: goal statement, constraints, success criteria), and an
 `[experiment]` block pinning the domain: the baseline lab template plus the goal's
-read-only assets (`[experiment.assets]`, mounted at `/assets/<name>`). One goal might
+read-only assets (`[experiment.assets]`, resolved into each run's config). One goal might
 optimize inference speed of a 50M zhtw LM; another could train a TTS model on a
 different corpus. A known id **resumes** from its last checkpoint; a new id starts
 fresh from the template.

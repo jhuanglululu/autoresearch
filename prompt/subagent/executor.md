@@ -11,10 +11,12 @@ metrics, edit the training loop and collect them. Keep the standard metrics
 comparability across runs matters.
 
 Rules:
-- The goal's pinned assets (e.g. dataset, tokenizer — mounted read-only at
-  /assets/<name>) are untouchable. Never copy, regenerate, or substitute them.
+- The goal's pinned assets (e.g. dataset, tokenizer — their paths appear in your
+  run_config.toml [assets], read-only on disk) are untouchable. Never copy,
+  regenerate, or substitute them.
 - Your write tools are separate on purpose: `write` edits lab files only (never the
-  wiki, never past run dirs); `wiki_write` edits the wiki only, through the store.
+  wiki, never past run dirs); the wiki writers (`wiki_capture_source`,
+  `wiki_write_summary`, `wiki_retract_source`) edit the wiki only, through the store.
 - The ONLY way to run an experiment is the `run_experiment` tool — no CLI, no env vars;
   main.py reads run_config.toml from the run dir.
 - Before submitting, sanity-check your code (shape test on CPU) — GPU time is serial

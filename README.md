@@ -20,8 +20,9 @@ src/autoresearch/
   queue/               filesystem GPU job queue + worker process
   harness/             fixed nanoGPT-style trainer with pluggable module slots
   bot/                 thin discord.py front-end
-scripts/download_dataset.py   one-time corpus download for the example goal
+scripts/download_dataset.py   one-time corpus download + pre-tokenize for the example goal
 tokenizer.json         pinned tokenizer asset of the example goal
+tests/                 pytest suite (wiki store/tools, analyze tool)
 ```
 
 ## Running (once implemented)
@@ -35,10 +36,20 @@ python -m autoresearch.queue.worker          # GPU worker (separate process)
 
 ## Status
 
-Scaffold: structure, configs, prompts, and contracts are in place; modules marked
-TODO(implement) are stubs. Suggested build order:
-1. `wiki/store.py` (port from research-bot) — everything else writes into it
-2. `experiments/baseline-lm-zhtw/` + `queue/` — a baseline run end-to-end, hand-submitted
-3. `llm/` clients + `subagent/runner.py`
-4. `orchestrator/loop.py` + checkpoints
-5. `bot/discord_bot.py`
+Done:
+- `config.py` — models.toml + goal loading (with `[experiment]` domain block)
+- `wiki/` — two-tier store (immutable sources / must-cite summaries), typed idea
+  graph, dual-path search, rebuildable index, 17 per-action tools (`wiki_*`)
+- `experiments/baseline-lm-zhtw/` — full lab template: `lab/model/` package
+  (rope/attention/ffn/block/gpt), fixed VAL_SIZE split, safetensors weights +
+  `model.json` provenance sidecar, `records.jsonl` event log, `record.md`;
+  CPU smoke-tested end-to-end (49,737,600-param default config)
+- `subagent/analyze.py` + `analyze_records` tool — inline read-only Python over
+  run bookkeeping
+- Sandbox decision: **subprocess, no Docker** (the GPU box is an unprivileged
+  container; see DESIGN.md — Experiments)
+
+In progress: `llm/` clients + `subagent/runner.py`.
+
+Remaining: `queue/worker.py` (subprocess launch + record capture),
+`orchestrator/loop.py` + spawn/checkpoint wiring, `bot/discord_bot.py`.

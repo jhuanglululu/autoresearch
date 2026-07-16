@@ -13,8 +13,9 @@ template = "templates/example.md"
 # Lab template (a uv project) copied to lab/<lab-id>/ when a lab is created.
 baseline = "experiments/baseline-lm-zhtw"
 
-# The goal's pinned untouchables, mounted read-only at /assets/<name> in every
-# run container. No subagent may edit, copy over, or substitute these.
+# The goal's pinned untouchables. The worker resolves these paths into each
+# run's run_config.toml [assets]; they are kept read-only on disk. No subagent
+# may edit, copy over, or substitute them.
 [experiment.assets]
 tokenizer = "tokenizer.json"
 corpus    = "data/wikipedia-zhtw"

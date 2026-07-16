@@ -45,7 +45,7 @@ class ModelsConfig:
 class ExperimentSpec:
     """The goal's experiment domain: which baseline lab template new labs copy,
     and which read-only assets (the untouchables — e.g. a dataset + tokenizer)
-    are mounted at /assets/<name> in every run container."""
+    the worker resolves into every run's run_config.toml [assets] section."""
 
     baseline: Path
     assets: dict[str, Path]

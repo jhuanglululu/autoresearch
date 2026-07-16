@@ -10,6 +10,8 @@ requires-python = ">=3.11"
 dependencies = [
     "torch>=2.4",
     "tokenizers>=0.19",
+    "numpy>=1.26",
+    "safetensors>=0.4",
 ]
 
 [build-system]
