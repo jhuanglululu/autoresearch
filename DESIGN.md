@@ -117,10 +117,12 @@ goal uses `experiments/baseline-lm-zhtw/`).
   `records.jsonl` (append-only machine log of everything — config, train/eval events,
   failures — for bookkeeping and Python analysis via `analyze_records`). Weights are
   saved as safetensors.
-- Single-GPU sequential job queue. Launching an experiment is a **tool call, not a CLI
-  invocation** — no CLI args, no env vars; everything from the lab + stored run config.
-  Code is snapshotted per run (`lab/<id>/runs/<n>/code/`, sha256-hashed) so any result
-  can be reproduced. Runs execute as **sandboxed subprocesses**: a per-run uv env built
+- Single-GPU sequential job queue. Launching an experiment is a **zero-argument tool
+  call**: `run_experiment` snapshots the entire current lab (including its
+  `run_config.toml`) into `lab/<id>/runs/<n>/code/` (sha256-hashed) and runs that
+  snapshot — the configuration can never depend on tool-call args, only on what is in
+  the files. To run something different, the engineer edits the lab files and calls
+  again. No CLI args, no env vars anywhere. Runs execute as **sandboxed subprocesses**: a per-run uv env built
   from the lab's pyproject, launched in its own process group (`setsid`) with
   cwd = run dir and a host-side wall-clock kill of the whole group; assets stay
   read-only via file permissions. Docker is deliberately not used: the rented GPU

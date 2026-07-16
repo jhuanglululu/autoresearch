@@ -40,6 +40,22 @@ class LLMResponse:
     stop_reason: str
 
 
+@dataclass
+class Usage:
+    """Cumulative token/call totals for one client, summed across complete()
+    calls. Mutable on purpose — the orchestrator's digests read these running
+    totals off ``client.usage``."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    calls: int = 0
+
+    def record(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.calls += 1
+
+
 class LLMClient:
     """Interface both provider clients implement."""
 

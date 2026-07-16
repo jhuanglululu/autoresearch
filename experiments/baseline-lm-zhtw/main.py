@@ -5,8 +5,14 @@ Reads run_config.toml from the run directory (the cwd), trains, and writes
 metrics.json + model.safetensors (+ model.json sidecar) + records.jsonl +
 record.md there. No CLI args, no env vars.
 
-run_config.toml schema ([assets] is REQUIRED — the worker resolves the goal's
-pinned read-only asset paths into it; all other fields optional, shown with
+The lab owns run_config.toml at its root — that file IS the run configuration.
+`run_experiment` takes no arguments: it snapshots the lab (this file included)
+into the run dir and runs it, so editing run_config.toml is how you change the
+next run. The worker resolves the goal's pinned read-only asset paths into the
+snapshot's [assets] section at launch (so the lab copy omits [assets]).
+
+run_config.toml schema ([assets] is REQUIRED at run time — the worker injects the
+goal's pinned read-only asset paths into it; all other fields optional, shown with
 baseline defaults):
 
     [assets]

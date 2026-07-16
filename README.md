@@ -48,8 +48,14 @@ Done:
   run bookkeeping
 - Sandbox decision: **subprocess, no Docker** (the GPU box is an unprivileged
   container; see DESIGN.md — Experiments)
+- `llm/` — Anthropic + OpenAI clients over raw httpx: message/tool translation,
+  prompt caching (system prompt), retries with Retry-After, cumulative usage
+- `subagent/` — the one-shot `Subagent` runner: per-type toolsets (executor 24
+  tools / researcher 22), path-guarded lab `write`, crash-proof tool dispatch,
+  kept sessions with `follow_up()`; `run_experiment` takes NO arguments — the
+  lab's own `run_config.toml` + code define the run, the tool snapshots and runs
 
-In progress: `llm/` clients + `subagent/runner.py`.
+In progress: `queue/` (filesystem job queue + worker: snapshot, asset injection,
+sandboxed subprocess launch, record capture).
 
-Remaining: `queue/worker.py` (subprocess launch + record capture),
-`orchestrator/loop.py` + spawn/checkpoint wiring, `bot/discord_bot.py`.
+Remaining: `orchestrator/loop.py` + spawn/checkpoint wiring, `bot/discord_bot.py`.

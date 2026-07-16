@@ -5,8 +5,8 @@ only through the filesystem, restartable independently).
 
 Loop: claim next pending job -> build/reuse the per-lab uv env (`uv sync` against
 the lab's pyproject) -> snapshot the lab code into the run dir (sha256-hashed) ->
-write run_config.toml with the goal's asset paths resolved into [assets] (refuse
-to launch if a declared asset is missing) -> launch main.py as a SANDBOXED
+copy the lab's run_config.toml into the run dir and inject the resolved [assets]
+section (refuse to launch if a declared asset is missing) -> launch main.py as a SANDBOXED
 SUBPROCESS: own process group (setsid), cwd = run dir, HOST-SIDE wall-clock
 timeout that kills the whole group -> on completion the run dir holds
 metrics.json, records.jsonl, model.safetensors (+ model.json), log, record.md;

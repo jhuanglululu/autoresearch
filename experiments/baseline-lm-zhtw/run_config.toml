@@ -1,0 +1,35 @@
+# Run configuration for this lab.
+#
+# This file IS the run configuration: `run_experiment` takes no arguments — it
+# snapshots the lab as-is and runs it, so whatever is written here defines the
+# NEXT run. Edit this file (with `write`) to change hyperparameters or model
+# shape, then call `run_experiment` again. `main.py` reads it from the run dir.
+#
+# [assets] is deliberately ABSENT here: the worker injects the goal's resolved
+# read-only asset paths (corpus, tokenizer) into the snapshot at launch, and
+# refuses to launch if a declared asset is missing. Never add [assets] yourself.
+#
+# Every field below is optional — omit one to fall back to main.py's baseline
+# default. Vocab size is always taken from the tokenizer, never set here. The
+# values shown are the ~50M baseline defaults.
+
+[model]
+d_model    = 640
+n_layers   = 9
+n_heads    = 10
+d_ff       = 1728
+block_size = 1024
+dropout    = 0.0
+
+[train]
+steps         = 20000
+batch_size    = 32
+grad_accum    = 1
+lr            = 3e-4
+min_lr        = 3e-5
+warmup_steps  = 200
+weight_decay  = 0.1
+grad_clip     = 1.0
+eval_interval = 500
+eval_iters    = 100
+seed          = 1337

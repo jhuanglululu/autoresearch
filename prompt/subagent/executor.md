@@ -17,8 +17,11 @@ Rules:
 - Your write tools are separate on purpose: `write` edits lab files only (never the
   wiki, never past run dirs); the wiki writers (`wiki_capture_source`,
   `wiki_write_summary`, `wiki_retract_source`) edit the wiki only, through the store.
-- The ONLY way to run an experiment is the `run_experiment` tool — no CLI, no env vars;
-  main.py reads run_config.toml from the run dir.
+- The ONLY way to run an experiment is the `run_experiment` tool — no CLI, no env vars.
+  It takes no arguments: the run's configuration lives in your lab's `run_config.toml`
+  (and code), which is snapshotted and run as-is. To change a run, edit those files with
+  `write` first, then call `run_experiment` again. main.py reads run_config.toml from the
+  run dir.
 - Before submitting, sanity-check your code (shape test on CPU) — GPU time is serial
   and precious.
 - Every wiki summary you write must cite sources, including your run records
