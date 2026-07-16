@@ -50,7 +50,7 @@ from ..config import GoalConfig, ModelsConfig
 from ..llm.base import LLMClient, Message, SpendCapExceeded, ToolCall, ToolSpec
 from ..llm.openai import make_client as _default_make_client
 from ..queue.jobs import JobQueue
-from ..queue.labs import LABS_ROOT, create_lab
+from ..queue.labs import LABS_ROOT, create_lab, revert_lab
 from ..queue.worker import make_run_experiment
 from ..subagent.runner import Subagent
 from ..wiki import WIKI_READ_TOOLS, WikiStore, execute_wiki_tool
@@ -153,6 +153,22 @@ KILL_SUBAGENT_TOOL = _spec(
     ["session_id"],
 )
 
+REVERT_LAB_TOOL = _spec(
+    "revert_lab",
+    {
+        "lab_id": {
+            "type": "string",
+            "description": "The lab whose working directory to restore.",
+        },
+        "run_number": {
+            "type": "integer",
+            "description": "The run whose code snapshot (runs/<n>/code) the lab's working "
+            "directory is reset to. The run archive itself is never touched.",
+        },
+    },
+    ["lab_id", "run_number"],
+)
+
 LIST_SESSIONS_TOOL = _spec("list_sessions", {}, [])
 GET_STATUS_TOOL = _spec("get_status", {}, [])
 
@@ -211,6 +227,7 @@ class Orchestrator:
             SPAWN_SUBAGENT_TOOL,
             FOLLOW_UP_SUBAGENT_TOOL,
             KILL_SUBAGENT_TOOL,
+            REVERT_LAB_TOOL,
             LIST_SESSIONS_TOOL,
             GET_STATUS_TOOL,
             *WIKI_READ_TOOLS,
@@ -373,6 +390,8 @@ class Orchestrator:
                 return await self._tool_follow_up(args)
             if name == "kill_subagent":
                 return await self._tool_kill(args)
+            if name == "revert_lab":
+                return self._tool_revert_lab(args)
             if name == "list_sessions":
                 return self._tool_list_sessions()
             if name == "get_status":
@@ -448,6 +467,23 @@ class Orchestrator:
     async def _tool_kill(self, args: dict) -> str:
         return await self.kill_session(args.get("session_id"))
 
+    def _tool_revert_lab(self, args: dict) -> str:
+        """Restore a lab's working tree to a run's code snapshot (archive untouched).
+
+        Orchestrator-only: subagents have no revert tool. Validates the args, then calls
+        labs.revert_lab, turning a missing lab/snapshot into a clear tool-result string."""
+        lab_id = args.get("lab_id")
+        if not isinstance(lab_id, str) or not lab_id.strip():
+            return "lab_id is required."
+        try:
+            n = int(args.get("run_number"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return "run_number is required and must be an integer."
+        try:
+            return revert_lab(self._labs_root / lab_id, n)
+        except (FileNotFoundError, OSError) as e:
+            return f"could not revert lab {lab_id}: {type(e).__name__}: {e}"
+
     # ----- public accessors (shared by the tool executors AND the Discord bot) -----
 
     async def kill_session(self, session_id: Any) -> str:
@@ -522,7 +558,9 @@ class Orchestrator:
         lines.append(f"GPU queue: pending={pending}, running={running_jobs}, done={done}")
         lines.append("token usage (cumulative):")
         lines.extend(self._usage_lines())
-        await self.channel.send("\n".join(lines))
+        # Fenced so digests are visually distinct from the orchestrator's own
+        # (LLM-written) messages in the Discord channel.
+        await self.channel.send("```text\n" + "\n".join(lines) + "\n```")
         self._state.last_digest_index = len(self._state.completed_sessions)
         self._last_digest_monotonic = time.monotonic()
         self._checkpoint()

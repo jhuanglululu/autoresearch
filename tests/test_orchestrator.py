@@ -18,6 +18,7 @@ from autoresearch.llm.base import LLMResponse, Message, SpendCapExceeded, ToolCa
 from autoresearch.orchestrator import loop as loop_mod
 from autoresearch.orchestrator.checkpoint import GoalState
 from autoresearch.orchestrator.loop import Orchestrator
+from autoresearch.subagent.runner import Subagent
 from autoresearch.wiki.store import WikiStore
 
 
@@ -173,7 +174,7 @@ def test_spawn_summary_checkpoint_digest(tmp_path):
     async def scenario():
         orch = _orch(tmp_path, script, factory=lambda *a, **k: runner)
         task = asyncio.ensure_future(orch.run())
-        await _wait_until(lambda: any(m.startswith("Digest") for m in orch.channel.sent))
+        await _wait_until(lambda: any(m.lstrip("`text\n").startswith("Digest") for m in orch.channel.sent))
         orch.request_stop()
         await asyncio.wait_for(task, 2)
         return orch
@@ -184,7 +185,7 @@ def test_spawn_summary_checkpoint_digest(tmp_path):
     assert runner.ran_with == ["build X"]
 
     # A digest was posted naming the finished session + queue depth + usage.
-    digest = next(m for m in orch.channel.sent if m.startswith("Digest"))
+    digest = next(m for m in orch.channel.sent if m.lstrip("`text\n").startswith("Digest"))
     assert "exec-1" in digest and "engine ran: val_loss=2.1" in digest
     assert "GPU queue:" in digest and "token usage" in digest
 
@@ -354,7 +355,7 @@ def test_resume_reads_prior_messages(tmp_path):
     async def first_run():
         orch = _orch(tmp_path, script, factory=lambda *a, **k: runner, state_root=state_root)
         task = asyncio.ensure_future(orch.run())
-        await _wait_until(lambda: any(m.startswith("Digest") for m in orch.channel.sent))
+        await _wait_until(lambda: any(m.lstrip("`text\n").startswith("Digest") for m in orch.channel.sent))
         orch.request_stop()
         await asyncio.wait_for(task, 2)
 
@@ -411,6 +412,51 @@ def test_get_status_and_unknown_model(tmp_path):
         orch._tool_spawn({"type": "researcher", "model": "nope", "prompt": "go"})
     )
     assert "unknown model" in bad and "opus" in bad and "gpt" in bad
+
+
+# ===== (h2) revert_lab: orchestrator-only tool, absent from subagent toolsets =====
+
+def test_revert_lab_in_orchestrator_toolset_only(tmp_path):
+    orch = _orch(tmp_path, [])
+    assert "revert_lab" in {t.name for t in orch._tool_specs}
+
+    # Build the real subagent runners and assert neither carries a revert tool — the
+    # keep/revert decision is the orchestrator's alone.
+    executor = Subagent(FakeLLM([]), "executor", "sys", lab_dir=tmp_path / "lab")
+    researcher = Subagent(FakeLLM([]), "researcher", "sys")
+    assert "revert_lab" not in {t.name for t in executor.tools}
+    assert "revert_lab" not in {t.name for t in researcher.tools}
+
+
+def test_revert_lab_tool_calls_labs_revert_and_returns_summary(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_revert(lab_dir, run_number):
+        calls["lab_dir"] = lab_dir
+        calls["run_number"] = run_number
+        return "lab lab-a restored to runs/2 snapshot; archive untouched"
+
+    monkeypatch.setattr(loop_mod, "revert_lab", fake_revert)
+
+    script = [
+        _tool("revert_lab", lab_id="lab-a", run_number=2),
+        _text("Reverted lab-a to run 2's snapshot."),
+    ]
+
+    async def scenario():
+        orch = _orch(tmp_path, script)
+        orch._messages = [Message(role="user", content="prior")]  # skip kickoff
+        await orch._run_turn(Message(role="user", content="revert lab-a to run 2"))
+        return orch
+
+    orch = asyncio.run(scenario())
+
+    # The tool routed to labs.revert_lab with the resolved lab dir + run number.
+    assert calls["lab_dir"] == orch._labs_root / "lab-a"
+    assert calls["run_number"] == 2
+    # revert_lab's one-line summary was fed back to the model as the tool result.
+    tool_results = [m.content for m in orch._messages if m.role == "tool"]
+    assert any("restored to runs/2 snapshot; archive untouched" in c for c in tool_results)
 
 
 # ===== (i) own-client spend cap -> channel message + stop, no crash =====

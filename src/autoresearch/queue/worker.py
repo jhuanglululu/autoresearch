@@ -20,7 +20,8 @@ Per job the worker:
      run crashed before writing its own. That capture is the "automated
      documentation" step; it is never a subagent's job.
 
-uv env strategy: the launch is `uv run --project runs/<n>/code python <code>/main.py`.
+uv env strategy: the launch is `uv run --no-config --project <ABS>/runs/<n>/code python
+<ABS>/runs/<n>/code/main.py` — every path is absolute (the child's cwd is the run dir).
 `uv run --project DIR` resolves/creates DIR's environment from its pyproject (and
 uv.lock if present), installs the project itself, then runs inside it. uv keeps a
 shared, content-addressed package cache, so torch et al. are downloaded/built once
@@ -73,8 +74,15 @@ Launcher = Callable[[Path], Sequence[str]]
 
 
 def default_launcher(code_dir: Path) -> list[str]:
-    """`uv run --project <code_dir> python` — a fresh, cached env per snapshot."""
-    return ["uv", "run", "--project", str(code_dir), "python"]
+    """`uv run --no-config --project <abs code_dir> python` — a fresh, cached env per
+    snapshot.
+
+    ``code_dir`` is ABSOLUTE (execute_job resolves it): the child runs with cwd=run_dir,
+    so a relative --project would either miss (uv then silently DISCOVERS some other
+    pyproject up the tree — wrong env, broken reproducibility) or resolve against the
+    wrong dir. --no-config makes uv ignore any uv.toml / [tool.uv] found up the tree so
+    the snapshot's OWN pyproject fully defines the env."""
+    return ["uv", "run", "--no-config", "--project", str(code_dir), "python"]
 
 
 def _now() -> str:
@@ -191,6 +199,28 @@ def _summary(status: str, n: int, wall: float, metrics: dict | None, source_id: 
 
 # ----- subprocess launch + host-side timeout -----
 
+def _child_env() -> dict[str, str]:
+    """Sanitized environment for the run subprocess.
+
+    The worker itself runs under `uv run`, so it inherits VIRTUAL_ENV (and possibly
+    UV_PROJECT_ENVIRONMENT) pointing at the REPO venv. If those leak to the child,
+    `uv run --project <snapshot>` warns and IGNORES VIRTUAL_ENV (best case) or resolves
+    against the wrong env — either way it undermines the per-snapshot env. Drop them so
+    uv resolves the snapshot's own env cleanly.
+
+    UV_LINK_MODE=copy: the uv cache (~/.cache) and the run's .venv frequently live on
+    different filesystems (target on NFS), where hardlinking fails and uv falls back to
+    a full copy after a noisy "Failed to hardlink files" warning. Forcing copy mode up
+    front skips the doomed hardlink attempt and silences the warning. Honour an operator
+    override if one is already set."""
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
+    env.setdefault("UV_LINK_MODE", "copy")
+    return env
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     """SIGTERM the run's process group, grace, then SIGKILL whatever survives."""
     try:
@@ -230,7 +260,7 @@ def _launch(cmd: Sequence[str], run_dir: Path, timeout_s: float) -> tuple[int | 
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # setsid: own process group, killable as a whole
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=_child_env(),
         )
         deadline = start + timeout_s
         timed_out = False
@@ -248,6 +278,21 @@ def _launch(cmd: Sequence[str], run_dir: Path, timeout_s: float) -> tuple[int | 
 
 
 # ----- the run machinery -----
+
+def _fail_cleanly(
+    wiki_store: WikiStore, run_dir: Path, lab_id: str, n: int, reason: str, code_hash: str
+) -> dict:
+    """Produce a clean FAILED job result WITHOUT launching a subprocess: log the reason,
+    synthesize + capture a record, and return the completion fields. Shared by the
+    missing-asset refusal and the missing-snapshot guard so both fail the job the same
+    way (documented, not a silent crash)."""
+    status = "failed"
+    (run_dir / "log.txt").write_text(f"launch refused: {reason}\n", encoding="utf-8")
+    record = _write_synthetic_record(run_dir, lab_id, n, status, 0.0, code_hash)
+    source_id = _capture_record(wiki_store, lab_id, n, status, record)
+    summary = f"run {n} failed — {reason} — source: {source_id}"
+    return {"status": status, "run_number": n, "run_dir": str(run_dir), "summary": summary}
+
 
 def execute_job(
     job: Job,
@@ -270,7 +315,12 @@ def execute_job(
     ``queue`` (the owning JobQueue) is optional: when given, the run dir is written back
     into running/<id>.json as soon as it is allocated, so a live observer (the forum
     feed) can tail this run's log while it is still in flight."""
-    lab_dir = Path(labs_root) / job.lab_id
+    # Resolve to an ABSOLUTE lab dir so every path derived below (run dir, snapshot,
+    # log.txt, and the uv --project / script path handed to the child) is absolute. The
+    # child runs with cwd=run_dir; a RELATIVE script would be re-resolved against that
+    # cwd (a doubled path), and a relative --project would make uv miss the snapshot and
+    # discover the wrong project. Production passes labs_root=Path("lab") (relative).
+    lab_dir = (Path(labs_root) / job.lab_id).resolve()
     if not lab_dir.is_dir():
         raise FileNotFoundError(f"lab does not exist: {lab_dir}")
 
@@ -285,14 +335,17 @@ def execute_job(
     try:
         _write_run_config(lab_dir, run_dir, goal.experiment.assets)
     except AssetError as e:
-        status = "failed"
-        (run_dir / "log.txt").write_text(f"launch refused: {e}\n", encoding="utf-8")
-        record = _write_synthetic_record(run_dir, job.lab_id, n, status, 0.0, code_hash)
-        source_id = _capture_record(wiki_store, job.lab_id, n, status, record)
-        summary = f"run {n} failed — {e} — source: {source_id}"
-        return {"status": status, "run_number": n, "run_dir": str(run_dir), "summary": summary}
+        return _fail_cleanly(wiki_store, run_dir, job.lab_id, n, str(e), code_hash)
 
+    # code_dir is absolute (lab_dir was resolved). Assert the snapshot we control is
+    # actually there RIGHT BEFORE launch: a missing dir means _snapshot_code failed
+    # silently, and handing uv a phantom --project would let it discover the wrong
+    # project. Fail loudly into the documented failure path instead.
     code_dir = run_dir / "code"
+    if not code_dir.is_dir():
+        reason = f"snapshot code dir missing, refusing to launch: {code_dir}"
+        return _fail_cleanly(wiki_store, run_dir, job.lab_id, n, reason, code_hash)
+
     cmd = [*launcher(code_dir), str(code_dir / "main.py")]
     returncode, wall, timed_out = _launch(cmd, run_dir, float(job.timeout_s))
 

@@ -55,7 +55,7 @@ def _api_keys(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-oai-test")
 
 
-def _endpoint(provider: str) -> ModelEndpoint:
+def _endpoint(provider: str, reasoning_effort: str | None = None) -> ModelEndpoint:
     if provider == "anthropic":
         return ModelEndpoint(
             name="orch",
@@ -68,10 +68,11 @@ def _endpoint(provider: str) -> ModelEndpoint:
         base_url=OPENAI_URL,
         model="gpt-5.6-sol",
         api_key_env="OPENAI_API_KEY",
+        reasoning_effort=reasoning_effort,
     )
 
 
-def _mock(provider, responses):
+def _mock(provider, responses, *, reasoning_effort: str | None = None):
     """Build a client whose transport replays ``responses`` (list of dicts or
     httpx.Response) in order, and a ``captured`` list receiving each request's
     parsed JSON body. Returns (client, captured, calls) where calls is a
@@ -88,8 +89,12 @@ def _mock(provider, responses):
         return httpx.Response(200, json=item)
 
     transport = httpx.MockTransport(handler)
-    cls = AnthropicClient if provider == "anthropic" else OpenAIClient
-    client = cls(_endpoint(provider), transport=transport)
+    if provider == "anthropic":
+        client = AnthropicClient(_endpoint(provider), transport=transport)
+    else:
+        client = OpenAIClient(
+            _endpoint(provider, reasoning_effort), transport=transport
+        )
     return client, captured, calls
 
 
@@ -144,45 +149,77 @@ def test_anthropic_request_translation():
     }
 
 
-def test_openai_request_translation():
-    resp = {
-        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+def _openai_ok(text="ok"):
+    """A minimal completed Responses reply carrying one text item."""
+    return {
+        "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": text}]}
+        ],
         "usage": {},
+        "status": "completed",
     }
-    client, captured, _ = _mock("openai", [resp])
+
+
+def test_openai_request_translation():
+    client, captured, _ = _mock("openai", [_openai_ok()])
     asyncio.run(client.complete("You are a researcher.", ROUNDTRIP_MESSAGES, TOOLS))
 
     body = captured[0]
     assert body["model"] == "gpt-5.6-sol"
+    assert body["max_output_tokens"] == 16000
+    # System prompt goes to the top-level instructions field.
+    assert body["instructions"] == "You are a researcher."
+
+    # Tool spec -> flat Responses tool shape (no nested "function" object).
     assert body["tools"] == [
         {
             "type": "function",
-            "function": {
-                "name": "search",
-                "description": "Search the web.",
-                "parameters": TOOLS[0].input_schema,
-            },
+            "name": "search",
+            "description": "Search the web.",
+            "parameters": TOOLS[0].input_schema,
         }
     ]
 
-    msgs = body["messages"]
-    assert msgs[0] == {"role": "system", "content": "You are a researcher."}
-    assert msgs[1] == {"role": "user", "content": "find X"}
+    inp = body["input"]
+    # user, assistant text, one function_call, and two function_call_output items.
+    assert inp[0] == {"role": "user", "content": "find X"}
+    assert inp[1] == {"role": "assistant", "content": "I'll search"}
 
-    assistant = msgs[2]
-    assert assistant["role"] == "assistant"
-    assert assistant["content"] == "I'll search"
-    tc = assistant["tool_calls"][0]
-    assert tc["id"] == "tu_1"
-    assert tc["type"] == "function"
-    assert tc["function"]["name"] == "search"
+    call = inp[2]
+    assert call["type"] == "function_call"
+    assert call["call_id"] == "tu_1"
+    assert call["name"] == "search"
     # arguments is a JSON *string*.
-    assert isinstance(tc["function"]["arguments"], str)
-    assert json.loads(tc["function"]["arguments"]) == {"q": "X"}
+    assert isinstance(call["arguments"], str)
+    assert json.loads(call["arguments"]) == {"q": "X"}
 
-    # tool results carry their tool_call_id.
-    assert msgs[3] == {"role": "tool", "tool_call_id": "tu_1", "content": "result A"}
-    assert msgs[4] == {"role": "tool", "tool_call_id": "tu_2", "content": "result B"}
+    # tool results become function_call_output items keyed by matching call_id.
+    assert inp[3] == {
+        "type": "function_call_output",
+        "call_id": "tu_1",
+        "output": "result A",
+    }
+    assert inp[4] == {
+        "type": "function_call_output",
+        "call_id": "tu_2",
+        "output": "result B",
+    }
+    assert len(inp) == 5
+
+
+def test_openai_omits_instructions_tools_and_reasoning_when_unset():
+    client, captured, _ = _mock("openai", [_openai_ok()])
+    asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
+    body = captured[0]
+    assert "instructions" not in body
+    assert "tools" not in body
+    assert "reasoning" not in body  # reasoning_effort not configured on the endpoint
+
+
+def test_openai_reasoning_effort_passed_through_when_configured():
+    client, captured, _ = _mock("openai", [_openai_ok()], reasoning_effort="medium")
+    asyncio.run(client.complete("", [Message(role="user", content="hi")], TOOLS))
+    assert captured[0]["reasoning"] == {"effort": "medium"}
 
 
 def test_anthropic_omits_system_and_tools_when_empty():
@@ -234,45 +271,72 @@ def test_anthropic_response_tool_call():
 
 def test_openai_response_text_only():
     resp = {
-        "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 20, "completion_tokens": 6},
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "thinking..."}],
+            },
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello"}],
+            },
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 6},
+        "status": "completed",
     }
     client, _, _ = _mock("openai", [resp])
     out = asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
-    assert out.message.content == "hello"
+    assert out.message.content == "hello"  # reasoning item skipped, output_text kept
     assert out.message.tool_calls == []
     assert out.input_tokens == 20
     assert out.output_tokens == 6
-    assert out.stop_reason == "end_turn"  # mapped from finish_reason="stop"
+    assert out.stop_reason == "end_turn"  # completed, no function_call items
 
 
 def test_openai_response_tool_call():
     resp = {
-        "choices": [
+        "output": [
             {
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_7",
-                            "type": "function",
-                            "function": {"name": "search", "arguments": '{"q": "dogs"}'},
-                        }
-                    ],
-                },
-                "finish_reason": "tool_calls",
-            }
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "picking a tool"}],
+            },
+            {
+                "type": "function_call",
+                "id": "fc_abc",  # the output item's own id...
+                "call_id": "call_7",  # ...distinct from the call_id we must echo back
+                "name": "search",
+                "arguments": '{"q": "dogs"}',
+            },
         ],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 9},
+        "usage": {"input_tokens": 5, "output_tokens": 9},
+        "status": "completed",
     }
     client, _, _ = _mock("openai", [resp])
     out = asyncio.run(client.complete("", [Message(role="user", content="hi")], TOOLS))
-    assert out.message.content == ""  # None content becomes ""
-    assert out.stop_reason == "tool_use"  # mapped from finish_reason="tool_calls"
+    assert out.message.content == ""
+    assert out.stop_reason == "tool_use"  # completed + a function_call item present
+    # ToolCall.id is the call_id (NOT the item id fc_abc) so it round-trips.
     assert out.message.tool_calls == [
         ToolCall(id="call_7", name="search", arguments={"q": "dogs"})
     ]
+
+
+def test_openai_response_incomplete_maps_to_max_tokens():
+    resp = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "partial"}],
+            }
+        ],
+        "usage": {"input_tokens": 4, "output_tokens": 16000},
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+    }
+    client, _, _ = _mock("openai", [resp])
+    out = asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
+    assert out.message.content == "partial"
+    assert out.stop_reason == "max_tokens"
 
 
 # --------------------------------------------------------------------------- #

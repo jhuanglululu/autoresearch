@@ -19,6 +19,9 @@ class ModelEndpoint:
     model: str
     api_key_env: str
     description: str = ""
+    # Optional reasoning effort (e.g. "low"/"medium"/"high") passed through to the
+    # OpenAI Responses client as reasoning.effort. The Anthropic client ignores it.
+    reasoning_effort: str | None = None
     # Optional per-endpoint spend cap (USD): once this client's cumulative cost
     # reaches ``cap`` its next complete() is refused. ``price_in``/``price_out`` are
     # USD per MILLION tokens and are what convert Usage tokens into dollars — a cap

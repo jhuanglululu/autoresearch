@@ -10,6 +10,7 @@ uv env build is skipped. Everything below the launcher is the production code pa
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -22,7 +23,7 @@ import pytest
 from autoresearch.config import ExperimentSpec, GoalConfig
 from autoresearch.queue import worker as W
 from autoresearch.queue.jobs import Job, JobQueue
-from autoresearch.queue.labs import COPY_EXCLUDE, create_lab, next_run_dir
+from autoresearch.queue.labs import COPY_EXCLUDE, create_lab, next_run_dir, revert_lab
 from autoresearch.wiki.store import WikiStore
 
 # A stdlib-only main.py: reads run_config.toml from cwd (proving [assets] injection),
@@ -58,6 +59,17 @@ from pathlib import Path
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 Path.cwd().joinpath("child.pid").write_text(str(child.pid))
 time.sleep(60)
+'''
+
+# Dumps the child's environment so a test can assert the worker sanitized it (dropped
+# the inherited VIRTUAL_ENV, set UV_LINK_MODE=copy).
+ENV_DUMP_MAIN = '''\
+import json, os
+from pathlib import Path
+run = Path.cwd()
+run.joinpath("env_dump.json").write_text(json.dumps(dict(os.environ)))
+run.joinpath("record.md").write_text("# env dump run\\n")
+print("env dumped")
 '''
 
 TEST_LAUNCHER = lambda code_dir: [sys.executable]  # noqa: E731 — the injected seam
@@ -217,6 +229,62 @@ def test_create_lab_copies_and_excludes(tmp_path):
     # A known id resumes, it does not re-seed: a second create errors.
     with pytest.raises(FileExistsError):
         create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+
+
+def test_revert_lab_restores_working_tree_and_keeps_archive(tmp_path):
+    lab = tmp_path / "lab" / "lab-a"
+    snap = lab / "runs" / "1" / "code"
+    snap.mkdir(parents=True)
+    # The run-1 code snapshot (the good state to restore to).
+    (snap / "main.py").write_text("v1")
+    (snap / "keep.txt").write_text("unchanged")
+    (snap / "NOTES.md").write_text("snapshot notes")
+    (snap / "gone.py").write_text("was here")  # deleted live -> must be restored
+    (snap / "sub").mkdir()
+    (snap / "sub" / "mod.py").write_text("mod-v1")
+    # Archive artifacts that MUST survive a revert: run 1's own record + a later run 2.
+    (lab / "runs" / "1" / "record.md").write_text("run1 record")
+    (lab / "runs" / "2" / "code").mkdir(parents=True)
+    (lab / "runs" / "2" / "record.md").write_text("run2 record")
+    (lab / "runs" / "2" / "code" / "main.py").write_text("v2-snapshot")
+
+    # The live working tree has diverged from run 1's snapshot.
+    (lab / "main.py").write_text("v2-modified")     # modified -> reverted
+    (lab / "keep.txt").write_text("unchanged")       # identical -> stays
+    (lab / "NOTES.md").write_text("live notes")       # modified; snapshot's copy wins
+    (lab / "added.py").write_text("added later")      # added after snapshot -> removed
+    (lab / "sub").mkdir()
+    (lab / "sub" / "mod.py").write_text("mod-v2")      # modified in a subdir
+    (lab / ".venv").mkdir()                            # rebuildable leftover -> removed
+    (lab / ".venv" / "x").write_text("env")
+    # gone.py deliberately absent from the live tree (deleted) -> restored from snapshot.
+
+    summary = revert_lab(lab, 1)
+
+    # Working tree is byte-identical to runs/1/code afterwards.
+    assert (lab / "main.py").read_text() == "v1"          # modified file reverted
+    assert (lab / "NOTES.md").read_text() == "snapshot notes"  # snapshot's copy won
+    assert (lab / "sub" / "mod.py").read_text() == "mod-v1"    # subdir reverted
+    assert (lab / "gone.py").read_text() == "was here"         # deleted file restored
+    assert not (lab / "added.py").exists()                     # post-snapshot add removed
+    assert not (lab / ".venv").exists()                        # leftover removed
+
+    # The archive is untouched: the snapshot used AND other runs' artifacts all survive.
+    assert (snap / "main.py").read_text() == "v1"
+    assert (lab / "runs" / "1" / "record.md").read_text() == "run1 record"
+    assert (lab / "runs" / "2" / "record.md").read_text() == "run2 record"
+    assert (lab / "runs" / "2" / "code" / "main.py").read_text() == "v2-snapshot"
+
+    assert summary == "lab lab-a restored to runs/1 snapshot; archive untouched"
+
+
+def test_revert_lab_errors_on_missing_run_or_lab(tmp_path):
+    lab = tmp_path / "lab" / "lab-a"
+    (lab / "runs").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError):
+        revert_lab(lab, 99)  # no runs/99/code snapshot
+    with pytest.raises(FileNotFoundError):
+        revert_lab(tmp_path / "lab" / "nope", 1)  # no such lab
 
 
 def test_next_run_dir_increments_max(tmp_path):
@@ -387,3 +455,97 @@ def test_run_timeout_from_goal_config(tmp_path, wiki):
     assert W._goal_timeout(goal) == 42
     goal_default = _goal(baseline, _make_assets(tmp_path))
     assert W._goal_timeout(goal_default) == W.DEFAULT_TIMEOUT_S
+
+
+# ----- (9) absolute launch paths (regression: relative --project / doubled script) -----
+
+def test_launcher_and_script_paths_are_absolute_into_run_code(tmp_path, wiki):
+    baseline = _make_baseline(tmp_path)
+    goal = _goal(baseline, _make_assets(tmp_path))
+    create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+    captured = {}
+
+    def capturing_launcher(code_dir):
+        captured["code_dir"] = code_dir
+        return [sys.executable]  # the script path is appended by execute_job
+
+    job = _job("abs", "2026-01-01T00:00:00")
+    result = W.execute_job(
+        job, goal, wiki, labs_root=tmp_path / "lab", launcher=capturing_launcher
+    )
+    code_dir = captured["code_dir"]  # what default_launcher would put after --project
+    # --project value is absolute and points into runs/<n>/code ...
+    assert code_dir.is_absolute()
+    assert code_dir == Path(result["run_dir"]) / "code"
+    assert code_dir.parts[-3:] == ("runs", str(result["run_number"]), "code")
+    # ... and default_launcher threads that absolute dir into --project.
+    argv = W.default_launcher(code_dir)
+    assert Path(argv[argv.index("--project") + 1]).is_absolute()
+    # The script path execute_job appends is absolute too, and main.py actually ran.
+    assert (code_dir / "main.py").is_absolute()
+    assert result["status"] == "ok"
+
+
+def test_relative_labs_root_yields_absolute_paths_and_runs(tmp_path, wiki, monkeypatch):
+    # The production regression: labs_root is RELATIVE ("lab"), the child's cwd is the
+    # run dir, so a relative script would double-resolve and the job would die. Resolving
+    # to absolute must fix it — main.py runs to completion.
+    baseline = _make_baseline(tmp_path)
+    goal = _goal(baseline, _make_assets(tmp_path))
+    create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+    captured = {}
+
+    def capturing_launcher(code_dir):
+        captured["code_dir"] = code_dir
+        return [sys.executable]
+
+    monkeypatch.chdir(tmp_path)
+    job = _job("rel", "2026-01-01T00:00:00")
+    result = W.execute_job(job, goal, wiki, labs_root="lab", launcher=capturing_launcher)
+    assert Path(result["run_dir"]).is_absolute()
+    assert captured["code_dir"].is_absolute()
+    assert result["status"] == "ok"
+
+
+def test_child_env_drops_virtualenv_and_forces_copy_link_mode(tmp_path, wiki, monkeypatch):
+    baseline = _make_baseline(tmp_path, main_src=ENV_DUMP_MAIN)
+    goal = _goal(baseline, _make_assets(tmp_path))
+    create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+    # The worker itself runs under `uv run`, so these are in its environment.
+    monkeypatch.setenv("VIRTUAL_ENV", "/repo/.venv")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/repo/.venv")
+    monkeypatch.delenv("UV_LINK_MODE", raising=False)
+    job = _job("env", "2026-01-01T00:00:00")
+    result = W.execute_job(job, goal, wiki, labs_root=tmp_path / "lab", launcher=TEST_LAUNCHER)
+    dump = json.loads((Path(result["run_dir"]) / "env_dump.json").read_text())
+    assert "VIRTUAL_ENV" not in dump
+    assert "UV_PROJECT_ENVIRONMENT" not in dump
+    assert dump.get("UV_LINK_MODE") == "copy"
+    assert dump.get("PYTHONUNBUFFERED") == "1"
+
+
+def test_child_env_preserves_operator_link_mode(tmp_path, wiki, monkeypatch):
+    baseline = _make_baseline(tmp_path, main_src=ENV_DUMP_MAIN)
+    goal = _goal(baseline, _make_assets(tmp_path))
+    create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+    monkeypatch.setenv("UV_LINK_MODE", "hardlink")  # an explicit override is honoured
+    job = _job("env2", "2026-01-01T00:00:00")
+    result = W.execute_job(job, goal, wiki, labs_root=tmp_path / "lab", launcher=TEST_LAUNCHER)
+    dump = json.loads((Path(result["run_dir"]) / "env_dump.json").read_text())
+    assert dump.get("UV_LINK_MODE") == "hardlink"
+
+
+def test_missing_snapshot_refuses_launch_and_documents(tmp_path, wiki, monkeypatch):
+    baseline = _make_baseline(tmp_path)
+    goal = _goal(baseline, _make_assets(tmp_path))
+    create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+    # Simulate _snapshot_code silently producing no code/ dir (returns a hash only).
+    monkeypatch.setattr(W, "_snapshot_code", lambda lab_dir, run_dir: "deadbeef")
+    job = _job("nosnap", "2026-01-01T00:00:00")
+    result = W.execute_job(job, goal, wiki, labs_root=tmp_path / "lab", launcher=TEST_LAUNCHER)
+    assert result["status"] == "failed"
+    assert "snapshot" in result["summary"].lower()
+    # No subprocess ran, but the failure is documented in the wiki.
+    assert not (Path(result["run_dir"]) / "metrics.json").exists()
+    captured = wiki.read_source(f"exp-lab-a-r{result['run_number']}")
+    assert "snapshot" in captured.lower()
