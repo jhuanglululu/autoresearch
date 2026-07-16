@@ -169,9 +169,9 @@ def test_feed_batches_lines_since_last_flush():
     msgs = forum.threads[0].messages
     assert len(msgs) == 1
     content = msgs[0].content
-    assert content == "🔧 a {q: 1}\n→ r1\n✅ done: s"  # plain lines, newline-joined
-    # No fence, no elapsed footer on the feed itself.
-    assert "```" not in content and "⏱" not in content
+    # One fenced batch, lines newline-joined inside; no elapsed footer on the feed.
+    assert content == "```text\n🔧 a {q: 1}\n→ r1\n✅ done: s\n```"
+    assert "⏱" not in content
 
 
 def test_feed_skips_empty_flushes():

@@ -468,7 +468,11 @@ class SessionThread:
             self._feed_buffer.clear()
             return
         lines, self._feed_buffer = self._feed_buffer, []
-        for chunk in split_message("\n".join(lines)):
+        # Fenced so tool-call batches read as machine activity, distinct from any
+        # prose in the thread. split_message is fence-aware, so oversized batches
+        # keep balanced fences per chunk.
+        batch = "```text\n" + "\n".join(lines) + "\n```"
+        for chunk in split_message(batch):
             if not chunk:
                 continue
             try:
