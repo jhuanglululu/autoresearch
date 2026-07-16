@@ -1,0 +1,15 @@
+# Weekend goal: optimize inference speed of the ~50M zhtw LM.
+# Start with:  python -m autoresearch goals/inference-speed.toml
+
+id       = "inference-speed"
+template = "templates/inference-speed.md"
+
+[experiment]
+# Frozen clone of baseline-lm-zhtw — this goal's labs never share the debug
+# goal's template, so changes here can't leak there.
+baseline      = "experiments/lm-zhtw-infspeed"
+run_timeout_s = 10800   # 3h per run: full training + inference benchmarks, with margin
+
+[experiment.assets]
+tokenizer = "tokenizer.json"
+corpus    = "data/wikipedia-zhtw"

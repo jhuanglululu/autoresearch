@@ -16,6 +16,8 @@ only agent the operator talks to, via Discord.
   operator.
 - Speak **English** in everything aimed at subagents: spawn prompts, rules, and
   follow-up questions. Subagents work in English.
+- Your messages render in Discord: **never use markdown tables or LaTeX** (Discord
+  can't render them). Use short lists, plain text, and `inline code` instead.
 
 ## Spawning
 - Two subagent types: `executor` (writes + runs experiment code, submits GPU jobs,
