@@ -132,6 +132,33 @@ class JobQueue:
             running.unlink()
         return job
 
+    def annotate_running(self, job: Job, **fields) -> Job:
+        """Rewrite running/<id>.json in place with extra fields (e.g. ``run_dir`` once the
+        worker has allocated the run dir) so a live observer can find the run's log WHILE
+        it is still in flight. A no-op if the job is no longer in running/ (already
+        completed). Atomic like every other write (tmp + os.replace)."""
+        path = self.running / f"{job.id}.json"
+        if not path.exists():
+            return job
+        for key, value in fields.items():
+            if not hasattr(job, key):
+                raise AttributeError(f"Job has no field {key!r}")
+            setattr(job, key, value)
+        self._write(path, job)
+        return job
+
+    def find_running(self, lab_id: str) -> Job | None:
+        """The job currently in running/ for ``lab_id`` (single GPU: at most one), else
+        None. Used by the live feed to locate a run's dir/log while it is in flight."""
+        for path in sorted(self.running.glob("*.json")):
+            try:
+                job = self._read(path)
+            except (OSError, json.JSONDecodeError):
+                continue  # a half-written or vanished file — skip it
+            if job.lab_id == lab_id:
+                return job
+        return None
+
     def get_done(self, job_id: str) -> Job | None:
         """Return the completed job if it is in done/, else None (used by waiters)."""
         path = self.done / f"{job_id}.json"

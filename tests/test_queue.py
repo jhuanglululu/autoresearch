@@ -139,6 +139,44 @@ def test_submit_rejects_duplicate_id(tmp_path):
         q.submit(_job("dup", "2026-01-01T00:00:01"))
 
 
+# ----- (1b) live-run plumbing: run_dir onto the running record + find_running -----
+
+def test_execute_job_annotates_running_with_run_dir(tmp_path, wiki):
+    baseline = _make_baseline(tmp_path)
+    goal = _goal(baseline, _make_assets(tmp_path))
+    create_lab(goal, "lab-a", labs_root=tmp_path / "lab")
+    q = JobQueue(tmp_path / "queue")
+    q.submit(_job("r", "2026-01-01T00:00:00"))
+    job = q.claim_next()
+
+    # execute_job does not complete the job (the worker loop does) — so afterwards it is
+    # still in running/, now carrying the run_dir the worker allocated at launch.
+    result = W.execute_job(
+        job, goal, wiki, labs_root=tmp_path / "lab", launcher=TEST_LAUNCHER, queue=q
+    )
+    running = q.find_running("lab-a")
+    assert running is not None
+    assert running.run_dir == result["run_dir"]
+
+
+def test_annotate_running_is_noop_when_not_in_running(tmp_path):
+    q = JobQueue(tmp_path / "queue")
+    job = _job("gone", "2026-01-01T00:00:00")  # never submitted/claimed
+    q.annotate_running(job, run_dir="whatever")  # must not raise, writes nothing
+    assert not (q.running / "gone.json").exists()
+
+
+def test_find_running_matches_lab_id(tmp_path):
+    q = JobQueue(tmp_path / "queue")
+    q.submit(_job("j1", "2026-01-01T00:00:00", lab_id="lab-a"))
+    q.submit(_job("j2", "2026-01-01T00:00:01", lab_id="lab-b"))
+    q.claim_next()  # lab-a -> running
+    q.claim_next()  # lab-b -> running
+    assert q.find_running("lab-a").id == "j1"
+    assert q.find_running("lab-b").id == "j2"
+    assert q.find_running("lab-z") is None
+
+
 # ----- (2) stale-running sweep -----
 
 def test_sweep_stale_fails_orphaned_running_jobs(tmp_path):

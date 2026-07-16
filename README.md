@@ -25,7 +25,7 @@ tokenizer.json         pinned tokenizer asset of the example goal
 tests/                 pytest suite (wiki store/tools, analyze tool)
 ```
 
-## Running (once implemented)
+## Running
 
 ```
 cp .env.example .env             # fill in tokens
@@ -68,4 +68,13 @@ Done:
   USD spend caps from models.toml (orchestrator stops at its cap; a capped
   subagent fails its session)
 
-In progress: `bot/discord_bot.py` + `__main__.py` wiring.
+- `bot/` + `__main__.py` — thin discord.py front-end: one steering channel where
+  only admin messages that @mention the bot reach the orchestrator (mention
+  stripped); /status /sessions /stop /kill-subagent answered from state without
+  LLM turns; /btw asks a side question over the orchestrator's context (no
+  tools, nothing appended); optional AUTORESEARCH_FORUM live feed — one thread
+  per subagent, batched tool-call briefs every ~7s; 2000-char fence-aware
+  splitting everywhere; entry point with .env loading and linked shutdown
+
+**The build order is complete.** Next: first live deployment (sync to the GPU
+box, download the corpus once, fill .env, run bot+orchestrator and the worker).

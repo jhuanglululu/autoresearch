@@ -256,6 +256,7 @@ def execute_job(
     *,
     labs_root: Path | str = LABS_ROOT,
     launcher: Launcher = default_launcher,
+    queue: JobQueue | None = None,
 ) -> dict:
     """Execute one claimed job end-to-end and return the result fields (status,
     run_number, run_dir, summary) for JobQueue.complete().
@@ -264,13 +265,19 @@ def execute_job(
     auto-captures the run record into the wiki. A missing asset fails the job cleanly
     (no subprocess is launched). ``launcher`` is a seam: production uses uv; tests
     inject a plain interpreter so no uv env is built (the subprocess sandbox — process
-    group, cwd, host timeout, log streaming — is exercised unchanged)."""
+    group, cwd, host timeout, log streaming — is exercised unchanged).
+
+    ``queue`` (the owning JobQueue) is optional: when given, the run dir is written back
+    into running/<id>.json as soon as it is allocated, so a live observer (the forum
+    feed) can tail this run's log while it is still in flight."""
     lab_dir = Path(labs_root) / job.lab_id
     if not lab_dir.is_dir():
         raise FileNotFoundError(f"lab does not exist: {lab_dir}")
 
     run_dir = next_run_dir(lab_dir)
     n = int(run_dir.name)
+    if queue is not None:  # publish the run dir onto the running record for live tailing
+        queue.annotate_running(job, run_dir=str(run_dir))
     code_hash = _snapshot_code(lab_dir, run_dir)
     (run_dir / "code.sha256").write_text(code_hash + "\n", encoding="utf-8")
 
@@ -366,7 +373,9 @@ def run_forever(
             continue
         print(f"[worker] claimed {job.id} (lab {job.lab_id})", flush=True)
         try:
-            result = execute_job(job, goal, wiki_store, labs_root=labs_root, launcher=launcher)
+            result = execute_job(
+                job, goal, wiki_store, labs_root=labs_root, launcher=launcher, queue=q
+            )
         except Exception as e:  # a broken job must not take the worker down
             result = {"status": "failed", "summary": f"worker error: {e!r}"}
         q.complete(job, **result)

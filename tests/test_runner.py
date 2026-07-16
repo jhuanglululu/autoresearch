@@ -283,6 +283,111 @@ def test_tool_exception_becomes_error_string(tmp_path, wiki, monkeypatch):
     assert "RuntimeError" in tool_results[0].content and "kaboom" in tool_results[0].content
 
 
+# ----- (g) on_event observability hook -----
+
+def test_on_event_emits_full_sequence_and_never_leaks_file_contents(tmp_path, wiki):
+    # A scripted session: write a big file, then finish. The write's content is a large
+    # blob that must NEVER appear in the emitted events (truncated at the source).
+    big = "SECRET_CONTENT " * 500  # ~7 KB of file body
+    events = []
+
+    async def sink(event):
+        events.append(event)
+
+    llm = FakeLLMClient([
+        _tool("write", call_id="w", path="main.py", content=big),
+        _text("wrote main.py, all good"),
+    ])
+    agent = _executor(tmp_path, wiki, llm=llm, on_event=sink)
+    summary = _run(agent.run("build the trainer with a long detailed prompt " * 10))
+    assert summary == "wrote main.py, all good"
+
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["start", "tool_call", "tool_result", "summary"]
+
+    start = events[0]
+    assert start["type"] == "executor"
+    assert len(start["prompt"]) <= 201  # 200 + ellipsis
+
+    call = events[1]
+    assert call["tool"] == "write"
+    assert len(call["brief"]) <= 120
+    # File contents never leak into the brief — only a short preview at most.
+    assert "SECRET_CONTENT SECRET_CONTENT SECRET_CONTENT" not in call["brief"]
+    assert "path" in call["brief"] and "main.py" in call["brief"]
+
+    result = events[2]
+    assert result["tool"] == "write" and len(result["text"]) <= 301
+
+    assert events[3]["kind"] == "summary"
+    assert "wrote main.py" in events[3]["text"]
+
+    # A short preview may appear, but the full ~7 KB blob NEVER leaks anywhere, and no
+    # single event is anywhere near the file's size.
+    assert big not in "".join(str(e) for e in events)
+    assert all(len(str(e)) < 500 for e in events)
+
+
+def test_on_event_tool_call_brief_matches_example_shape(tmp_path, wiki):
+    events = []
+
+    async def sink(event):
+        events.append(event)
+
+    llm = FakeLLMClient([_tool("web_search", query="rope scaling"), _text("done")])
+    # web_search hits the network only if executed; mock DDGS so no real call.
+    class FakeDDGS:
+        def text(self, query, max_results):
+            return [{"title": "A", "href": "http://a", "body": "snippet"}]
+
+    import autoresearch.subagent.tools as _T
+    _orig = _T.DDGS
+    _T.DDGS = FakeDDGS
+    try:
+        agent = _executor(tmp_path, wiki, llm=llm, on_event=sink)
+        _run(agent.run("go"))
+    finally:
+        _T.DDGS = _orig
+
+    call = next(e for e in events if e["kind"] == "tool_call")
+    assert call["tool"] == "web_search"
+    assert call["brief"] == "{query: 'rope scaling'}"
+
+
+def test_on_event_follow_up_emits_question_and_summary(tmp_path, wiki):
+    events = []
+
+    async def sink(event):
+        events.append(event)
+
+    llm = FakeLLMClient([_text("first summary"), _text("second summary")])
+    agent = _executor(tmp_path, wiki, llm=llm, on_event=sink)
+    _run(agent.run("initial"))
+    events.clear()
+    _run(agent.follow_up("and now?"))
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["follow_up", "summary"]
+    assert events[0]["question"] == "and now?"
+    assert events[1]["text"] == "second summary"
+
+
+def test_broken_on_event_never_breaks_the_run(tmp_path, wiki):
+    async def boom(event):
+        raise RuntimeError("observer exploded")
+
+    llm = FakeLLMClient([_tool("wiki_tags", call_id="t"), _text("survived")])
+    agent = _executor(tmp_path, wiki, llm=llm, on_event=boom)
+    summary = _run(agent.run("go"))  # a raising observer must not propagate
+    assert summary == "survived"
+
+
+def test_no_on_event_is_pure_noop(tmp_path, wiki):
+    # Default (on_event=None): identical behaviour, and no attribute surprises.
+    llm = FakeLLMClient([_text("plain")])
+    agent = _executor(tmp_path, wiki, llm=llm)
+    assert _run(agent.run("go")) == "plain"
+
+
 # ----- web_search / fetch_page behind mocks (never real network) -----
 
 def test_web_search_mocked(tmp_path, wiki, monkeypatch):

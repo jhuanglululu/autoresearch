@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from ..config import GoalConfig, ModelsConfig
 from ..llm.base import LLMClient, Message, SpendCapExceeded, ToolCall, ToolSpec
@@ -57,6 +58,8 @@ from .channel import Channel
 from .checkpoint import STATE_DIR, GoalState
 from .spawn import SessionManager, SubagentRunner, SubagentSession, SubagentType
 
+log = logging.getLogger(__name__)
+
 _PROMPT_DIR = Path(__file__).resolve().parents[3] / "prompt"
 
 # Sane default per-spawn wall-clock timeout (overridable per spawn). Subagents plan +
@@ -68,8 +71,20 @@ DEFAULT_SPAWN_TIMEOUT_S = 2 * 60 * 60
 # in a few rounds with plain text).
 DEFAULT_MAX_ROUNDS = 40
 
-# A factory that builds the runner a session drives, given (type, model, prompt, lab_id).
-SubagentFactory = Callable[[SubagentType, str, str, "str | None"], SubagentRunner]
+# A fire-and-forget observability callback for one subagent's activity (see
+# subagent.runner.EventCallback), plus the factory that mints one per session — given
+# (session_id, type, model, prompt, lab_id) it returns a callback or None (feature
+# disabled). lab_id lets the feed tail an executor's in-flight run log.
+EventCallback = Callable[[dict], Awaitable[None]]
+SessionObserverFactory = Callable[
+    [str, SubagentType, str, str, "str | None"], "EventCallback | None"
+]
+
+# A factory that builds the runner a session drives, given (type, model, prompt, lab_id,
+# on_event). The trailing on_event is the observability hook (None = no feed).
+SubagentFactory = Callable[
+    [SubagentType, str, str, "str | None", "EventCallback | None"], SubagentRunner
+]
 MakeClient = Callable[[Any], LLMClient]
 
 
@@ -156,6 +171,7 @@ class Orchestrator:
         llm_client: LLMClient | None = None,
         subagent_factory: SubagentFactory | None = None,
         make_client: MakeClient | None = None,
+        session_observer_factory: SessionObserverFactory | None = None,
         digest_interval_s: float = 3600,
         default_timeout_s: float = DEFAULT_SPAWN_TIMEOUT_S,
         max_rounds: int = DEFAULT_MAX_ROUNDS,
@@ -170,11 +186,15 @@ class Orchestrator:
         self._make_client = make_client or _default_make_client
         self._own_client = llm_client or self._make_client(self.models.orchestrator)
         self._subagent_factory = subagent_factory or self._build_subagent
+        self._session_observer_factory = session_observer_factory
         self._digest_interval_s = digest_interval_s
         self._default_timeout_s = default_timeout_s
         self._max_rounds = max_rounds
 
         self._subagent_clients: dict[str, LLMClient] = {}
+        # on_event callbacks for the read-only forum feed, kept per live session so the
+        # loop can emit a closing "end" event when the session finalizes.
+        self._session_observers: dict[str, EventCallback] = {}
         self._sessions = SessionManager()
         # Tasks of subagents whose outcome still needs an evaluation turn.
         self._watching: dict[asyncio.Task, SubagentSession] = {}
@@ -202,6 +222,37 @@ class Orchestrator:
         """Ask the loop to exit after the in-flight subagent finishes."""
         self._stop = True
         self._stop_event.set()
+
+    async def aside(self, question: str) -> str:
+        """Answer a side-channel question (Discord ``/btw``) from the CURRENT context
+        without touching it.
+
+        Builds a one-off message list — a snapshot copy of ``self._messages`` plus a
+        single framing user message — and calls the orchestrator's own client with
+        ``tools=[]`` (no tools available for an aside). Nothing is mutated: the history
+        is neither appended to nor checkpointed, and no session/digest state is touched,
+        so a ``/btw`` may run concurrently with an in-flight turn — asides never mutate
+        the list, and the snapshot copy taken here is a consistent view at call time.
+
+        A spent budget is reported as text (the same wording as a turn), never raised —
+        an aside must never stop the loop.
+        """
+        framed = Message(
+            role="user",
+            content=(
+                "Side question from the operator — answer directly from what you "
+                "already know; you have no tools for this: " + question
+            ),
+        )
+        one_off = [*self._messages, framed]  # snapshot copy; self._messages untouched
+        try:
+            response = await self._own_client.complete(self._system_prompt, one_off, [])
+        except SpendCapExceeded as e:
+            return (
+                f"orchestrator spend cap reached: ${e.spent:.2f} of ${e.cap:.2f} "
+                "— raise cap in models.toml and restart"
+            )
+        return response.message.content
 
     async def run(self) -> None:
         """Drive the orchestrator until stopped."""
@@ -353,12 +404,18 @@ class Orchestrator:
         if type_ == "executor" and (not isinstance(lab_id, str) or not lab_id.strip()):
             return "executor spawns require a lab_id."
 
+        # Mint the (optional) observability hook BEFORE building the runner so the runner
+        # streams into the feed from its first event. session_id must exist first.
+        session_id = self._sessions.peek_next_id(type_)
+        on_event = self._make_observer(session_id, type_, model, prompt, lab_id)
         try:
-            runner = self._subagent_factory(type_, model, prompt, lab_id)
+            runner = self._subagent_factory(type_, model, prompt, lab_id, on_event)
         except Exception as e:
             return f"could not spawn: {type(e).__name__}: {e}"
 
         session = self._sessions.create(type_, model, prompt, runner)
+        if on_event is not None:
+            self._session_observers[session.id] = on_event
         timeout_s = args.get("timeout_s")
         timeout_s = float(timeout_s) if timeout_s else self._default_timeout_s
         task = asyncio.ensure_future(session.run(timeout_s))
@@ -389,7 +446,13 @@ class Orchestrator:
         return f"{session_id} (follow-up): {answer}"
 
     async def _tool_kill(self, args: dict) -> str:
-        session_id = args.get("session_id")
+        return await self.kill_session(args.get("session_id"))
+
+    # ----- public accessors (shared by the tool executors AND the Discord bot) -----
+
+    async def kill_session(self, session_id: Any) -> str:
+        """Kill a running session directly (Discord ``/kill-subagent`` and the
+        ``kill_subagent`` tool both route here). Returns a short ack string."""
         session = self._sessions.get(session_id) if isinstance(session_id, str) else None
         if session is None:
             return f"no such session: {session_id!r}."
@@ -403,7 +466,9 @@ class Orchestrator:
         self._finalize_session(session)
         return f"killed {session_id}."
 
-    def _tool_list_sessions(self) -> str:
+    def sessions_text(self) -> str:
+        """One line per session (id, type/model, status, elapsed, first summary line).
+        Backs the ``list_sessions`` tool and the Discord ``/sessions`` command."""
         sessions = self._sessions.all()
         if not sessions:
             return "no sessions yet."
@@ -416,7 +481,12 @@ class Orchestrator:
             )
         return "\n".join(lines)
 
-    def _tool_get_status(self) -> str:
+    def _tool_list_sessions(self) -> str:
+        return self.sessions_text()
+
+    def status_text(self) -> str:
+        """Programmatic status snapshot (no LLM turn): running subagents, GPU queue
+        depth, cumulative token/spend. Backs the ``get_status`` tool and ``/status``."""
         active = self._sessions.active()
         if active:
             running = ", ".join(
@@ -432,6 +502,9 @@ class Orchestrator:
             *self._usage_lines(),
         ]
         return "\n".join(lines)
+
+    def _tool_get_status(self) -> str:
+        return self.status_text()
 
     # ----- digests (programmatic; no LLM call) -----
 
@@ -501,8 +574,31 @@ class Orchestrator:
             self._subagent_clients[model_name] = client
         return client
 
+    def _make_observer(
+        self,
+        session_id: str,
+        type_: SubagentType,
+        model: str,
+        prompt: str,
+        lab_id: str | None,
+    ) -> "EventCallback | None":
+        """Mint the (optional) observability hook for a new session. A missing factory or
+        one that raises leaves the session unobserved — the feed is best-effort only."""
+        if self._session_observer_factory is None:
+            return None
+        try:
+            return self._session_observer_factory(session_id, type_, model, prompt, lab_id)
+        except Exception:  # the feed must never affect spawning
+            log.warning("session_observer_factory failed for %s", session_id, exc_info=True)
+            return None
+
     def _build_subagent(
-        self, type_: SubagentType, model: str, prompt: str, lab_id: str | None
+        self,
+        type_: SubagentType,
+        model: str,
+        prompt: str,
+        lab_id: str | None,
+        on_event: "EventCallback | None" = None,
     ) -> SubagentRunner:
         client = self._client_for(model)
         if type_ == "executor":
@@ -521,6 +617,7 @@ class Orchestrator:
                 wiki_store=self.wiki_store,
                 pinned_assets=list(self.goal.experiment.assets.values()),
                 run_experiment_callable=run_callable,
+                on_event=on_event,
             )
         return Subagent(
             client,
@@ -528,6 +625,7 @@ class Orchestrator:
             self._subagent_system_prompt("researcher"),
             archive_dir=self._labs_root,
             wiki_store=self.wiki_store,
+            on_event=on_event,
         )
 
     @staticmethod
@@ -555,7 +653,33 @@ class Orchestrator:
             summary=session.summary or "",
             status=session.status,
         )
+        self._close_observer(session)
         self._checkpoint()
+
+    def _close_observer(self, session: SubagentSession) -> None:
+        """Emit a final ``end`` event to the session's forum feed (if any) so it flushes
+        and closes its thread. Fire-and-forget: scheduled, never awaited, never raises —
+        it covers every termination (done/failed/timeout/killed), including those where
+        the runner emitted no summary (it was cancelled)."""
+        cb = self._session_observers.pop(session.id, None)
+        if cb is None:
+            return
+        event = {
+            "kind": "end",
+            "status": session.status,
+            "summary": (session.summary or "")[:200],
+        }
+        try:
+            asyncio.ensure_future(self._safe_emit(cb, event))
+        except RuntimeError:  # no running loop (e.g. a synchronous test) — skip
+            pass
+
+    @staticmethod
+    async def _safe_emit(cb: "EventCallback", event: dict) -> None:
+        try:
+            await cb(event)
+        except Exception:
+            log.warning("session observer end hook failed", exc_info=True)
 
     def _checkpoint(self) -> None:
         self._state.set_messages(self._messages)

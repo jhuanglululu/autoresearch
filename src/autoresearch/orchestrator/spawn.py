@@ -20,7 +20,6 @@ scheduling (interruptible waits, retry-via-prompt, checkpoints) lives in ``loop.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import time
 from typing import Literal, Protocol
 
@@ -111,14 +110,20 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, SubagentSession] = {}
-        self._counters: dict[SubagentType, itertools.count] = {
-            "executor": itertools.count(1),
-            "researcher": itertools.count(1),
-        }
+        self._counters: dict[SubagentType, int] = {"executor": 0, "researcher": 0}
+
+    @staticmethod
+    def _prefix(type_: SubagentType) -> str:
+        return "exec" if type_ == "executor" else "res"
+
+    def peek_next_id(self, type_: SubagentType) -> str:
+        """The id ``create`` will assign next for ``type_`` — WITHOUT consuming it. Lets a
+        caller wire per-session state (e.g. the forum feed) before the session exists."""
+        return f"{self._prefix(type_)}-{self._counters[type_] + 1}"
 
     def _next_id(self, type_: SubagentType) -> str:
-        prefix = "exec" if type_ == "executor" else "res"
-        return f"{prefix}-{next(self._counters[type_])}"
+        self._counters[type_] += 1
+        return f"{self._prefix(type_)}-{self._counters[type_]}"
 
     def create(
         self,

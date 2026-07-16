@@ -149,7 +149,13 @@ that is how it decides which model to spawn per task.
 
 ## Discord & stack
 
-- One channel, plain chat + slash commands; digests posted there.
+- One steering channel: only admin messages that **@mention the bot** reach the
+  orchestrator (it doesn't know it's on Discord; ambient chat must not confuse it) —
+  the mention is stripped before delivery. Slash commands + digests live there too.
+- One optional **forum channel** (`AUTORESEARCH_FORUM`): a read-only live feed of
+  subagent activity — a new thread per spawned subagent, batched updates every ~7s
+  with brief tool-call descriptions and truncated results (never full contents).
+  No steering there.
 - Python monorepo; custom thin async loop over raw Anthropic + OpenAI APIs (async HTTP,
   no agent frameworks); `discord.py`.
 - Plain folders everywhere: wiki + archive are directory trees subagents explore with

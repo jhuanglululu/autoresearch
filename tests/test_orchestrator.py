@@ -459,6 +459,106 @@ def test_usage_lines_report_dollars_when_priced(tmp_path):
     assert "$20.00/$50" in status
 
 
+# ===== (j) session observer factory wiring (forum feed seam) =====
+
+def test_session_observer_factory_is_wired_and_closed(tmp_path):
+    runner = FakeRunner(summary="engine ran: val_loss=2.1")
+    calls, events = [], []
+
+    def obs_factory(session_id, type_, model, prompt, lab_id):
+        calls.append((session_id, type_, model, prompt, lab_id))
+
+        async def sink(event):
+            events.append(event)
+
+        return sink
+
+    script = [
+        _tool("spawn_subagent", type="executor", model="opus", prompt="build X", lab_id="lab-a"),
+        _text("Started."),
+        _text("Recorded."),
+    ]
+
+    async def scenario():
+        orch = _orch(tmp_path, script, factory=lambda *a, **k: runner)
+        orch._session_observer_factory = obs_factory
+        task = asyncio.ensure_future(orch.run())
+        await _wait_until(lambda: any(e.get("kind") == "end" for e in events))
+        orch.request_stop()
+        await asyncio.wait_for(task, 2)
+
+    asyncio.run(scenario())
+
+    # The factory was called once with (session_id, type, model, prompt, lab_id) — id
+    # previewed BEFORE the session was created, so it matches the assigned id.
+    assert calls == [("exec-1", "executor", "opus", "build X", "lab-a")]
+    # A closing "end" event carried the final status + summary to the feed.
+    end = next(e for e in events if e["kind"] == "end")
+    assert end["status"] == "done" and "val_loss=2.1" in end["summary"]
+
+
+def test_no_observer_factory_stores_nothing(tmp_path):
+    # Default: no factory -> no per-session observer bookkeeping (pure no-op seam).
+    orch = _orch(tmp_path, [])
+    assert orch._session_observer_factory is None
+    assert orch._session_observers == {}
+
+
+# ===== (k) aside: /btw side-channel question uses context, mutates nothing =====
+
+def test_aside_uses_context_with_no_tools(tmp_path):
+    orch = _orch(tmp_path, [_text("the val_loss was 2.1")])
+    orch._messages = [
+        Message(role="user", content="earlier: run the trainer"),
+        Message(role="assistant", content="ran it, val_loss=2.1"),
+    ]
+
+    answer = asyncio.run(orch.aside("what was the val_loss again?"))
+    assert answer == "the val_loss was 2.1"
+
+    # The model saw the prior history + the framed question, and NO tools.
+    system, messages_sent, tool_names = orch._own_client.sent[-1]
+    assert tool_names == []  # an aside has no tools
+    contents = [m.content for m in messages_sent]
+    assert "ran it, val_loss=2.1" in contents  # prior context arrived
+    assert any("Side question from the operator" in c and "what was the val_loss again?" in c
+               for c in contents)
+    # The framed question is last and carries the "no tools" framing.
+    assert "what was the val_loss again?" in messages_sent[-1].content
+
+
+def test_aside_does_not_mutate_context_or_checkpoint(tmp_path):
+    state_root = tmp_path / "state"
+    orch = _orch(tmp_path, [_text("answer")], state_root=state_root)
+    orch._messages = [Message(role="user", content="prior")]
+    orch._checkpoint()  # establish a baseline checkpoint on disk
+
+    ckpt = state_root / "t" / "checkpoint.json"
+    before_len = len(orch._messages)
+    before_bytes = ckpt.read_bytes()
+    before_mtime = ckpt.stat().st_mtime_ns
+
+    answer = asyncio.run(orch.aside("a side question"))
+    assert answer == "answer"
+
+    # History is untouched; nothing was checkpointed by the aside.
+    assert len(orch._messages) == before_len
+    assert orch._messages[-1].content == "prior"  # no framed message appended
+    assert ckpt.read_bytes() == before_bytes
+    assert ckpt.stat().st_mtime_ns == before_mtime
+
+
+def test_aside_spend_cap_returns_message_not_raise(tmp_path):
+    orch = _orch(tmp_path, [])
+    orch._own_client = CapLLM()  # complete() raises SpendCapExceeded(55, 50)
+    orch._messages = [Message(role="user", content="prior")]
+
+    answer = asyncio.run(orch.aside("anything?"))
+    assert "spend cap reached" in answer and "$55.00 of $50.00" in answer
+    # The loop was NOT asked to stop (an aside must never stop it).
+    assert orch._stop is False
+
+
 # ===== checkpoint round-trip of tool-call messages =====
 
 def test_checkpoint_message_roundtrip(tmp_path):
