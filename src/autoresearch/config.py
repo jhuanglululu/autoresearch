@@ -45,10 +45,15 @@ class ModelsConfig:
 class ExperimentSpec:
     """The goal's experiment domain: which baseline lab template new labs copy,
     and which read-only assets (the untouchables — e.g. a dataset + tokenizer)
-    the worker resolves into every run's run_config.toml [assets] section."""
+    the worker resolves into every run's run_config.toml [assets] section.
+
+    ``run_timeout_s`` is the optional per-goal host-side wall-clock kill for a run
+    (``[experiment].run_timeout_s`` in the goal TOML). ``None`` means "use the
+    worker's DEFAULT_TIMEOUT_S" — kept optional so existing goals stay valid."""
 
     baseline: Path
     assets: dict[str, Path]
+    run_timeout_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -84,8 +89,15 @@ def load_goal(path: Path | str) -> GoalConfig:
     # Assets may not exist yet (datasets are downloaded during setup) — resolved,
     # not validated here; the worker refuses to launch a run with a missing asset.
     assets = {name: (root / rel).resolve() for name, rel in exp.get("assets", {}).items()}
+    run_timeout_s = exp.get("run_timeout_s")
+    if run_timeout_s is not None:
+        run_timeout_s = int(run_timeout_s)
+        if run_timeout_s <= 0:
+            raise ValueError("[experiment].run_timeout_s must be a positive integer (seconds)")
     return GoalConfig(
         id=raw["id"],
         template_path=template,
-        experiment=ExperimentSpec(baseline=baseline, assets=assets),
+        experiment=ExperimentSpec(
+            baseline=baseline, assets=assets, run_timeout_s=run_timeout_s
+        ),
     )

@@ -55,7 +55,12 @@ Done:
   kept sessions with `follow_up()`; `run_experiment` takes NO arguments — the
   lab's own `run_config.toml` + code define the run, the tool snapshots and runs
 
-In progress: `queue/` (filesystem job queue + worker: snapshot, asset injection,
-sandboxed subprocess launch, record capture).
+- `queue/` — filesystem job queue (atomic-rename lanes, fail-not-requeue stale
+  sweep), lab lifecycle, worker: snapshot + sha256, [assets] injection,
+  per-snapshot uv env, setsid subprocess with SIGTERM→SIGKILL group timeout,
+  automated record.md capture as wiki source `exp-<lab>-r<n>`;
+  `make_run_experiment()` plugs straight into the Subagent runner
 
-Remaining: `orchestrator/loop.py` + spawn/checkpoint wiring, `bot/discord_bot.py`.
+In progress: `orchestrator/loop.py` + spawn/checkpoint wiring.
+
+Remaining: `bot/discord_bot.py`.

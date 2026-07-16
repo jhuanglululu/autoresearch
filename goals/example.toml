@@ -13,6 +13,10 @@ template = "templates/example.md"
 # Lab template (a uv project) copied to lab/<lab-id>/ when a lab is created.
 baseline = "experiments/baseline-lm-zhtw"
 
+# Optional host-side wall-clock kill for a single run, in seconds. Omit to use
+# the worker's default (~6h). Uncomment to bound runs more tightly for this goal.
+# run_timeout_s = 21600
+
 # The goal's pinned untouchables. The worker resolves these paths into each
 # run's run_config.toml [assets]; they are kept read-only on disk. No subagent
 # may edit, copy over, or substitute them.
