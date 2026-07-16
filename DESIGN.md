@@ -164,4 +164,8 @@ that is how it decides which model to spawn per task.
 
 - Final GPU choice: RTX 5090 (32 GB) vs RTX 6000-class — affects max batch size only.
 - Discord bot token + server setup.
-- No API spend cap requested — digests report token spend; nothing throttles.
+- ~~No API spend cap~~ Per-model spend caps: each models.toml entry carries `cap`
+  (USD) + `price_in`/`price_out` (USD per 1M tokens); a client whose accumulated
+  cost reaches its cap refuses further calls. The orchestrator reports and stops
+  on its own cap; a capped subagent surfaces as a failed session (not retryable
+  with the same model). Digests show $spent/$cap per model.

@@ -19,6 +19,13 @@ class ModelEndpoint:
     model: str
     api_key_env: str
     description: str = ""
+    # Optional per-endpoint spend cap (USD): once this client's cumulative cost
+    # reaches ``cap`` its next complete() is refused. ``price_in``/``price_out`` are
+    # USD per MILLION tokens and are what convert Usage tokens into dollars — a cap
+    # is only enforceable when both prices are set (validated in load_models).
+    cap: float | None = None
+    price_in: float | None = None
+    price_out: float | None = None
 
     def resolve_api_key(self) -> str:
         key = os.environ.get(self.api_key_env, "")
@@ -66,12 +73,22 @@ class GoalConfig:
         return self.template_path.read_text(encoding="utf-8")
 
 
+def _validate_endpoint(ep: ModelEndpoint) -> None:
+    if ep.cap is not None and (ep.price_in is None or ep.price_out is None):
+        raise ValueError(
+            f"model {ep.name!r}: cap needs price_in/price_out to be enforceable "
+            "(USD per 1M tokens) — set both or drop the cap"
+        )
+
+
 def load_models(path: Path | str = "models.toml") -> ModelsConfig:
     raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     orch = ModelEndpoint(name="orchestrator", **raw["orchestrator"])
     subs = tuple(ModelEndpoint(**entry) for entry in raw.get("subagent_model", []))
     if not subs:
         raise ValueError("models.toml defines no [[subagent_model]] entries")
+    for ep in (orch, *subs):
+        _validate_endpoint(ep)
     return ModelsConfig(orchestrator=orch, subagent_models=subs)
 
 

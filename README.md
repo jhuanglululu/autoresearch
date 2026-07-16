@@ -61,6 +61,11 @@ Done:
   automated record.md capture as wiki source `exp-<lab>-r<n>`;
   `make_run_experiment()` plugs straight into the Subagent runner
 
-In progress: `orchestrator/loop.py` + spawn/checkpoint wiring.
+- `orchestrator/` — the always-on loop: races user messages / subagent tasks /
+  digest timer; fire-and-forget spawns with one prompt-driven retry; kept
+  sessions + `follow_up_subagent`; kill/steer mid-run; programmatic digests;
+  checkpoint per turn and per finished subagent (restart resumes); per-model
+  USD spend caps from models.toml (orchestrator stops at its cap; a capped
+  subagent fails its session)
 
-Remaining: `bot/discord_bot.py`.
+In progress: `bot/discord_bot.py` + `__main__.py` wiring.

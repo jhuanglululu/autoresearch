@@ -18,7 +18,7 @@ import pytest
 from autoresearch.config import ModelEndpoint
 from autoresearch.llm.anthropic import AnthropicClient
 from autoresearch.llm.openai import OpenAIClient, make_client
-from autoresearch.llm.base import Message, ToolCall, ToolSpec
+from autoresearch.llm.base import Message, SpendCapExceeded, ToolCall, ToolSpec, Usage
 
 
 ANTHROPIC_URL = "https://api.anthropic.com"
@@ -350,3 +350,112 @@ def test_usage_accumulates_across_calls():
 def test_make_client_dispatch():
     assert isinstance(make_client(_endpoint("anthropic")), AnthropicClient)
     assert isinstance(make_client(_endpoint("openai")), OpenAIClient)
+
+
+# --------------------------------------------------------------------------- #
+# Spend caps
+# --------------------------------------------------------------------------- #
+
+def test_cost_usd_math():
+    u = Usage()
+    u.record(1_000_000, 500_000)
+    # price_in=$10/1M, price_out=$50/1M -> $10 + $25 = $35.
+    assert u.cost_usd(10.0, 50.0) == 35.0
+
+
+def test_cap_refuses_before_any_request():
+    """At/over cap, complete() raises SpendCapExceeded WITHOUT making an HTTP call."""
+    calls = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        return httpx.Response(200, json={"content": [], "usage": {}, "stop_reason": "end_turn"})
+
+    endpoint = ModelEndpoint(
+        name="orch",
+        base_url=ANTHROPIC_URL,
+        model="claude-opus-4-8",
+        api_key_env="ANTHROPIC_API_KEY",
+        cap=0.5,
+        price_in=10.0,
+        price_out=30.0,
+    )
+    client = AnthropicClient(endpoint, transport=httpx.MockTransport(handler))
+    # 100k output tokens at $30/1M = $3.00, already over the $0.50 cap.
+    client.usage.record(0, 100_000)
+
+    with pytest.raises(SpendCapExceeded) as exc:
+        asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
+
+    assert calls[0] == 0  # refused before the request
+    assert exc.value.endpoint == "orch"
+    assert exc.value.cap == 0.5
+    assert exc.value.spent == 3.0
+    assert "spend cap" in str(exc.value)
+
+
+def test_cap_allows_the_call_that_crosses_then_refuses_next():
+    """The call that crosses the cap runs; the following one is refused."""
+    resp = {
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 0, "output_tokens": 100_000},
+        "stop_reason": "end_turn",
+    }
+    calls = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        return httpx.Response(200, json=resp)
+
+    endpoint = ModelEndpoint(
+        name="orch",
+        base_url=ANTHROPIC_URL,
+        model="claude-opus-4-8",
+        api_key_env="ANTHROPIC_API_KEY",
+        cap=1.0,
+        price_in=0.0,
+        price_out=30.0,
+    )
+    client = AnthropicClient(endpoint, transport=httpx.MockTransport(handler))
+
+    # First call: under cap (spend is 0), runs and pushes spend to $3.00.
+    asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
+    assert calls[0] == 1
+    # Second call: already over cap -> refused, no new request.
+    with pytest.raises(SpendCapExceeded):
+        asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
+    assert calls[0] == 1
+
+
+def test_no_cap_never_refuses():
+    resp = {"content": [{"type": "text", "text": "ok"}], "usage": {}, "stop_reason": "end_turn"}
+    client, _, calls = _mock("anthropic", [resp])
+    client.usage.record(10_000_000, 10_000_000)  # huge spend, but no cap set
+    asyncio.run(client.complete("", [Message(role="user", content="hi")], []))
+    assert calls[0] == 1
+
+
+def test_load_models_cap_without_price_raises(tmp_path):
+    from autoresearch.config import load_models
+
+    p = tmp_path / "models.toml"
+    p.write_text(
+        """
+[orchestrator]
+base_url    = "https://api.anthropic.com"
+model       = "claude-fable-5"
+api_key_env = "ANTHROPIC_API_KEY"
+cap         = 50
+
+[[subagent_model]]
+name        = "opus"
+base_url    = "https://api.anthropic.com"
+model       = "claude-opus-4-8"
+api_key_env = "ANTHROPIC_API_KEY"
+price_in    = 5
+price_out   = 25
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="cap needs price_in/price_out"):
+        load_models(p)

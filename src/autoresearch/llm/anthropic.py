@@ -12,7 +12,15 @@ import httpx
 
 from ..config import ModelEndpoint
 from ._http import post_json
-from .base import LLMClient, LLMResponse, Message, ToolCall, ToolSpec, Usage
+from .base import (
+    LLMClient,
+    LLMResponse,
+    Message,
+    ToolCall,
+    ToolSpec,
+    Usage,
+    raise_if_capped,
+)
 
 MAX_TOKENS = 16000
 _MESSAGES_PATH = "v1/messages"
@@ -37,6 +45,9 @@ class AnthropicClient(LLMClient):
     async def complete(
         self, system: str, messages: list[Message], tools: list[ToolSpec]
     ) -> LLMResponse:
+        # Refuse BEFORE spending: if cumulative cost already reached the cap, the
+        # previous call was the one allowed to cross the line — this one is refused.
+        raise_if_capped(self.endpoint, self.usage)
         body: dict[str, Any] = {
             "model": self.endpoint.model,
             "max_tokens": MAX_TOKENS,
