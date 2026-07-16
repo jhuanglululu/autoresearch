@@ -1,0 +1,13 @@
+# Debugging goal — exercises every feature once, cheaply, then waits.
+# Start with:  python -m autoresearch goals/debug.toml
+
+id       = "debug"
+template = "templates/debug.md"
+
+[experiment]
+baseline      = "experiments/baseline-lm-zhtw"
+run_timeout_s = 900   # a debug run is tiny; kill anything past 15 min
+
+[experiment.assets]
+tokenizer = "tokenizer.json"
+corpus    = "data/wikipedia-zhtw"
